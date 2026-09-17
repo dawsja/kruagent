@@ -1,0 +1,336 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+  --font-heading: var(--font-inter);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  /*
+   * Kru's named palette. The names describe the role a colour plays in the
+   * dark theme (linen is the page, paper-white the cards, carbon the ink);
+   * the light theme keeps every role and flips the values, so a component
+   * written as `bg-paper-white text-carbon` reads correctly in both.
+   */
+  --color-carbon: var(--carbon);
+  --color-paper-white: var(--paper-white);
+  --color-linen: var(--linen);
+  --color-mist: var(--mist);
+  --color-fog: var(--fog);
+  --color-ash: var(--ash);
+  --color-graphite: var(--graphite);
+  --color-lavender: var(--brand);
+  --color-iris: var(--brand-deep);
+  --color-brand: var(--brand);
+  --color-brand-deep: var(--brand-deep);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-ink: var(--brand-ink);
+  --color-mint: var(--mint);
+  --color-mint-wash: var(--mint-wash);
+  --color-amber: var(--amber);
+  --color-sky: var(--sky);
+  --color-magenta: var(--magenta);
+  --color-grape: var(--grape);
+  --color-ember: var(--ember);
+  --color-ink: var(--carbon);
+  --radius-sm: 8px;
+  --radius-md: 8px;
+  --radius-lg: 8px;
+  --radius-xl: 16px;
+  --radius-2xl: 16px;
+  --radius-3xl: 24px;
+  --radius-4xl: 9999px;
+  --shadow-subtle: var(--shadow-subtle);
+  --shadow-subtle-2: var(--shadow-subtle-2);
+  --shadow-subtle-3: var(--shadow-subtle-3);
+}
+
+/*
+ * Light theme (the default; `.dark` on <html> switches to the dark set).
+ *
+ * The neutrals share the warm, slightly yellow hue of the dark theme's ink
+ * (#f2efe9) so the two modes feel like one product. Every text token was
+ * checked against the surfaces it sits on and clears WCAG AA (4.5:1) for
+ * body-size text:
+ *
+ *   ash      #6b6863  5.0:1 on linen, 4.5:1 on mist   (tertiary text)
+ *   graphite #524f4a  7.4:1 on linen                  (secondary text)
+ *   carbon   #1b1a18 15.7:1 on linen                  (primary text)
+ *   brand-ink #bd3b00 5.0:1 on linen, 4.5:1 on mist   (orange text)
+ *   mint     #1a7d38  4.7:1 on linen
+ *   amber    #8a5a00  5.3:1 on linen
+ *   sky      #2266c4  5.0:1 on linen
+ *   ember    #c2301a  5.1:1 on linen, white on it 5.6:1
+ *
+ * Other accents are deepened rather than re-hued. The orange brand is the
+ * logo's exact #ff5000 in both themes for fills (buttons, send, borders,
+ * rings). It is too light to carry white text (3.3:1) or to be text on light
+ * surfaces (3.0:1), so labels on it use --brand-foreground (near-black,
+ * 6.0:1) and orange text uses --brand-ink, the same hue darkened to AA.
+ */
+:root {
+  --carbon: #1b1a18;
+  --paper-white: #ffffff;
+  --linen: #f5f3ee;
+  --mist: #ebe8e1;
+  --fog: #d6d2c9;
+  --ash: #6b6863;
+  --graphite: #524f4a;
+  --brand: #ff5000;
+  --brand-deep: #d64300;
+  --brand-foreground: #0c0c0e;
+  --brand-ink: #bd3b00;
+  --mint: #1a7d38;
+  --mint-wash: #dcf3e3;
+  --amber: #8a5a00;
+  --sky: #2266c4;
+  --magenta: #b8307f;
+  --grape: #8250df;
+  --ember: #c2301a;
+
+  --background: var(--linen);
+  --foreground: var(--carbon);
+  --card: var(--paper-white);
+  --card-foreground: var(--carbon);
+  --popover: var(--paper-white);
+  --popover-foreground: var(--carbon);
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+  --secondary: var(--mist);
+  --secondary-foreground: var(--carbon);
+  --muted: var(--mist);
+  --muted-foreground: var(--graphite);
+  --accent: var(--mist);
+  --accent-foreground: var(--carbon);
+  --destructive: var(--ember);
+  --border: var(--fog);
+  --input: #c9c5bb;
+  --ring: var(--brand);
+  --chart-1: var(--brand);
+  --chart-2: var(--sky);
+  --chart-3: var(--mint);
+  --chart-4: var(--amber);
+  --chart-5: var(--magenta);
+  --radius: 1rem;
+  --sidebar: var(--paper-white);
+  --sidebar-foreground: var(--carbon);
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--mist);
+  --sidebar-accent-foreground: var(--carbon);
+  --sidebar-border: var(--fog);
+  --sidebar-ring: var(--brand);
+  --shadow-subtle: 0 1px 1px rgba(20, 16, 8, 0.06),
+    0 0 0 1px rgba(20, 16, 8, 0.08);
+  --shadow-subtle-2: 0 1px 2px rgba(20, 16, 8, 0.08),
+    0 0 0 1px rgba(20, 16, 8, 0.08);
+  --shadow-subtle-3: 0 16px 40px rgba(20, 16, 8, 0.16),
+    0 0 0 1px rgba(20, 16, 8, 0.06);
+  --grid-line: rgba(20, 16, 8, 0.07);
+  --stack-shadow: rgba(20, 16, 8, 0.18);
+  /* How far bot identity colours are pulled toward the ink so they stay
+     legible as small text on light surfaces: at 40% every bot name clears
+     4.5:1 on both linen and paper-white. */
+  --bot-ink-mix: 40%;
+  color-scheme: light;
+}
+
+.dark {
+  --carbon: #f2efe9;
+  --paper-white: #161618;
+  --linen: #0c0c0e;
+  --mist: #1c1c1f;
+  --fog: #2c2c31;
+  --ash: #7a7874;
+  --graphite: #b4b0aa;
+  --brand: #ff5000;
+  --brand-deep: #ff7333;
+  --brand-foreground: #0c0c0e;
+  --brand-ink: var(--brand);
+  --mint: #3ddc6a;
+  --mint-wash: #12351c;
+  --amber: #ffb020;
+  --sky: #5b9dff;
+  --magenta: #e85bb8;
+  --grape: #a371f7;
+  --ember: #ff5c24;
+
+  --background: var(--linen);
+  --foreground: var(--carbon);
+  --card: var(--paper-white);
+  --card-foreground: var(--carbon);
+  --popover: var(--paper-white);
+  --popover-foreground: var(--carbon);
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+  --secondary: var(--mist);
+  --secondary-foreground: var(--carbon);
+  --muted: var(--mist);
+  --muted-foreground: var(--graphite);
+  --accent: var(--mist);
+  --accent-foreground: var(--carbon);
+  --destructive: var(--ember);
+  --border: var(--fog);
+  --input: var(--mist);
+  --ring: var(--brand);
+  --chart-1: var(--brand);
+  --chart-2: var(--sky);
+  --chart-3: var(--mint);
+  --chart-4: var(--amber);
+  --chart-5: var(--magenta);
+  --sidebar: var(--paper-white);
+  --sidebar-foreground: var(--carbon);
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--mist);
+  --sidebar-accent-foreground: var(--carbon);
+  --sidebar-border: var(--fog);
+  --sidebar-ring: var(--brand);
+  --shadow-subtle: 0 1px 1px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-subtle-2: 0 1px 2px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-subtle-3: 0 16px 40px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+  --grid-line: rgba(255, 255, 255, 0.055);
+  --stack-shadow: rgba(0, 0, 0, 0.6);
+  --bot-ink-mix: 0%;
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply font-sans antialiased;
+    letter-spacing: -0.02em;
+  }
+
+  body {
+    @apply bg-background text-foreground font-normal;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-heading), ui-sans-serif, system-ui, sans-serif;
+    font-weight: 600;
+    color: var(--carbon);
+  }
+}
+
+.blueprint-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+@keyframes kru-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.kru-dot {
+  animation: kru-dot 1s ease-in-out infinite;
+}
+
+.kru-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.kru-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* The ring that fills while a card is held before it lifts for dragging. */
+@keyframes kru-hold-ring {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.kru-hold-ring {
+  animation: kru-hold-ring linear forwards;
+}
+
+/*
+ * A long column's cards overlap like a stack: each tucks its top under the
+ * card above by --kru-stack-overlap (a fifth of that card, set by CardStack).
+ * Hovering a card lifts it to the front and opens the gap below it, so it
+ * shows in full while the cards around it stay put.
+ */
+.kru-stack > * {
+  position: relative;
+  transition:
+    margin-top 220ms cubic-bezier(0.2, 0, 0, 1),
+    transform 220ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.kru-stack > * + * {
+  margin-top: calc(-1 * var(--kru-stack-overlap, 0px));
+  box-shadow: 0 -8px 16px -10px var(--stack-shadow);
+}
+
+@media (hover: hover) {
+  .kru-stack > *:hover {
+    z-index: 10;
+    transform: translateY(-2px) scale(1.015);
+    box-shadow: var(--shadow-subtle-3);
+  }
+
+  .kru-stack > *:hover + * {
+    margin-top: 0.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kru-stack > * {
+    transition: none;
+  }
+}

@@ -1,0 +1,17 @@
+import { withSession } from "@/lib/auth/guard";
+import { NextResponse } from "next/server";
+import { isTerminalId, proxyBoxStream, requireBox } from "@/lib/hq/box-routes";
+
+/** VNC server bytes as server-sent events; each event carries base64 bytes. */
+async function handleGet(
+  request: Request,
+  context: RouteContext<"/api/box/desktop/connections/[id]/stream">,
+) {
+  const { id } = await context.params;
+  if (!isTerminalId(id)) return NextResponse.json({ error: "Bad connection id" }, { status: 400 });
+  const box = requireBox();
+  if (box instanceof NextResponse) return box;
+  return proxyBoxStream(box, `/desktop/connections/${id}/stream`, request);
+}
+
+export const GET = withSession(handleGet);

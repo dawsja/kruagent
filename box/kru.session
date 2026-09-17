@@ -1,0 +1,8 @@
+[GNOME Session]
+# GNOME Flashback (Metacity) for a container: the stock session's list of
+# required components minus the ones that need hardware or logind. Power
+# refuses to start without logind and its failure would bring up the
+# "Something has gone wrong" screen; Rfkill, Smartcard, Wacom, USB
+# protection, printing and sharing have nothing to manage in a box.
+Name=Kru box
+RequiredComponents=metacity;gnome-flashback;gnome-panel;org.gnome.SettingsDaemon.A11ySettings;org.gnome.SettingsDaemon.Color;org.gnome.SettingsDaemon.Datetime;org.gnome.SettingsDaemon.Housekeeping;org.gnome.SettingsDaemon.Keyboard;org.gnome.SettingsDaemon.MediaKeys;org.gnome.SettingsDaemon.ScreensaverProxy;org.gnome.SettingsDaemon.Sound;org.gnome.SettingsDaemon.XSettings;

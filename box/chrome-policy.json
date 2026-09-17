@@ -1,0 +1,10 @@
+{
+  "MetricsReportingEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "PasswordManagerEnabled": false,
+  "BackgroundModeEnabled": false,
+  "CommandLineFlagSecurityWarningsEnabled": false
+}

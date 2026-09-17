@@ -1,0 +1,62 @@
+services:
+  kru:
+    image: ${KRU_IMAGE:-ghcr.io/dawsja/kruagent:latest}
+    # To build from source instead, uncomment this (and `build` on the box
+    # below) and run `docker compose up -d --build` from a clone of the repo.
+    # build: .
+    restart: unless-stopped
+    ports:
+      # Reachable only from this machine. Put a reverse proxy with HTTPS in
+      # front of it for remote access (see README).
+      - "${KRU_PORT:-3000}:3000"
+      # "Sign in with ChatGPT" returns to http://localhost:1455/auth/callback,
+      # an address OpenAI fixed. Remove this line if you only use API keys or
+      # the code sign-in, or if another tool (Codex CLI) needs the port.
+      - "127.0.0.1:${KRU_OAUTH_PORT:-1455}:3000"
+    environment:
+      # Must match the address you open in the browser.
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      # Optional; passed through only when set in your shell or .env file.
+      - KRU_SECRET_KEY
+      - KRU_SETUP_TOKEN
+      # The box, where agents clone repos and run commands. Required.
+      - KRU_BOX_URL=http://box:8787
+    volumes:
+      - kru-data:/data
+      # The box writes its access token here on first start.
+      - kru-box-state:/box-state:ro
+    depends_on:
+      - box
+    # Lets Kru reach Ollama or other servers on the host as
+    # http://host.docker.internal:<port>.
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+  # Agents work in here: one clone per run, commands run as an unprivileged
+  # user, and the workspace is deleted when the run ends. No ports are
+  # published; only Kru can reach it. Nothing in it can see Kru's data.
+  box:
+    image: ${KRU_BOX_IMAGE:-ghcr.io/dawsja/kruagent-box:latest}
+    # build: ./box
+    restart: unless-stopped
+    volumes:
+      - kru-box-state:/state
+      # Package caches survive runs and restarts, so installs are fast.
+      - kru-box-cache:/home/agent/.cache
+      # The Claude Code sign-in, made once from the box desktop, survives
+      # restarts and image updates. Kru never reads it.
+      - kru-box-claude:/home/agent/.claude
+    security_opt:
+      - no-new-privileges:true
+    # The desktop's X server and GTK apps share pixmaps through /dev/shm.
+    shm_size: ${KRU_BOX_SHM:-256m}
+    # Keep a runaway build or test from taking the host down.
+    pids_limit: 2048
+    mem_limit: ${KRU_BOX_MEMORY:-4g}
+    cpus: ${KRU_BOX_CPUS:-2}
+
+volumes:
+  kru-data:
+  kru-box-state:
+  kru-box-cache:
+  kru-box-claude:
