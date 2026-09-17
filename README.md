@@ -524,6 +524,11 @@ docker build -t kru-box box && docker run --rm -p 127.0.0.1:8787:8787 -e BOX_TOK
 With the box running like that, put `KRU_BOX_URL=http://127.0.0.1:8787` and
 `KRU_BOX_TOKEN=dev` in `.env.local` and `bun run dev` uses it.
 
+## AI Disclaimer
+
+AI was used to write a lot of the backend Box logic and the custom claude code driver.
+Frontend was mostly provided by shadcn skills and blocks with lucide react icons.
+
 ## License
 
 The code is [MIT](LICENSE). Third-party notices are in
