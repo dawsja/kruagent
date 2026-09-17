@@ -161,12 +161,24 @@ export function repoInstructionsSection(instructions: string | null | undefined)
   return text ? `Standing instructions for this repo, from the person:\n${text}` : "";
 }
 
-export function reviewPrompt(card: Card, run: Run, testReport: string | null, repoInstructions?: string | null): string {
+/**
+ * `steering` is the direction the person gave while the card was being
+ * worked on (see steering-logic.ts): part of the task, for judging the
+ * change against what was actually asked in the end.
+ */
+export function reviewPrompt(
+  card: Card,
+  run: Run,
+  testReport: string | null,
+  repoInstructions?: string | null,
+  steering?: string | null,
+): string {
   return [
     `Repo: ${card.repo}`,
     `Task: ${card.title}`,
     card.body ? `Details:\n${card.body}` : "",
     repoInstructionsSection(repoInstructions),
+    steering?.trim() ?? "",
     isFollowUp(run)
       ? `This is a follow-up on pull request${run.prNumber ? ` #${run.prNumber}` : ""}, which is already open: the change below is only what this round adds to it. Judge whether it answers what was asked.`
       : "",
@@ -185,11 +197,18 @@ export const SCRIBE_RULES = [
   "Plain text or a short bullet list. No headings, no greeting, no commit message: that is written separately.",
 ].join("\n");
 
-export function scribePrompt(card: Card, run: Run, testReport: string | null, reviewNotes: string | null): string {
+export function scribePrompt(
+  card: Card,
+  run: Run,
+  testReport: string | null,
+  reviewNotes: string | null,
+  steering?: string | null,
+): string {
   return [
     `Repo: ${card.repo}`,
     `Task: ${card.title}`,
     card.body ? `Details:\n${card.body}` : "",
+    steering?.trim() ?? "",
     run.summary ? `The builder's summary: ${run.summary}` : "",
     `Kiko's checks:\n${testReport ?? "not run"}`,
     reviewNotes ? `Lulu's notes: ${reviewNotes}` : "",

@@ -1,3 +1,4 @@
+import type { SteerOutcome } from "./bots/steering-logic";
 import type { Card, Connection, ProposedWrite } from "./types";
 
 /*
@@ -69,9 +70,33 @@ export type AgentInput = {
    * are already on the branch being cloned (a follow-up on a pull request),
    * so nothing is written before the agent starts.
    */
-  previous?: { writes: ProposedWrite[]; summary: string | null; note: string; applied?: boolean };
+  previous?: {
+    writes: ProposedWrite[];
+    summary: string | null;
+    note: string;
+    applied?: boolean;
+    /** The previous run was stopped part-way, not reviewed: this one picks its work up. */
+    resumed?: boolean;
+  };
   /** The person's standing instructions for the card's repo. */
   repoInstructions?: string | null;
+  /** Direction given on the card's earlier runs from the Team room, as a prompt section. */
+  steeringNotes?: string | null;
+  /**
+   * Steering while this run works. The runner asks `pending` at each safe
+   * point (it is cheap) and, when a note waits, `consider`: the bot reads
+   * it, answers in the room, and the outcome says what the run does next.
+   */
+  steering?: {
+    pending: () => boolean;
+    consider: () => Promise<SteerOutcome | null>;
+  };
+  /**
+   * True when the run was cancelled to be restarted later rather than
+   * discarded: the runner then hands back what it has instead of throwing
+   * the workspace away.
+   */
+  isStopped?: () => boolean;
 };
 
 /** Longest repo agent notes (AGENTS.md, CLAUDE.md) quoted into a prompt. */
@@ -89,7 +114,13 @@ export function agentNotesSection(file: { name: string; content: string } | null
   return `The repo's ${file.name}, notes for agents working in it:\n${shown}`;
 }
 
-export type AgentResult = { writes: ProposedWrite[]; warning: string | null; summary: string | null };
+export type AgentResult = {
+  writes: ProposedWrite[];
+  warning: string | null;
+  summary: string | null;
+  /** The run was stopped part-way; `writes` is what it had changed by then. */
+  stopped?: boolean;
+};
 
 /** Cancelled runs end with this error; the run route ignores it. */
 export class RunCancelledError extends Error {
@@ -99,6 +130,40 @@ export class RunCancelledError extends Error {
   }
 }
 
+/** Thrown inside a runner when the run was stopped to be restarted later; never leaves it. */
+export class RunStoppedError extends Error {
+  constructor() {
+    super("Run stopped");
+    this.name = "RunStoppedError";
+  }
+}
+
+/** Which way a cancelled run ends: kept for a restart, or thrown away. */
+export function cancelError(input: Pick<AgentInput, "isStopped">) {
+  return input.isStopped?.() ? new RunStoppedError() : new RunCancelledError();
+}
+
+/**
+ * The safe point between two steps of Kru's own runner: nothing is
+ * half-written, so a cancel lands here, and so does a steering note from
+ * the room. Returns the conversation with the bot's answer added as the
+ * next user turn when a note was read, or undefined to go on as before.
+ * Throws when the run was cancelled, or stopped by the note itself.
+ */
+export async function steerStep<M>(
+  input: Pick<AgentInput, "isCancelled" | "isStopped" | "steering" | "log">,
+  messages: M[],
+): Promise<{ messages: (M | { role: "user"; content: string })[] } | undefined> {
+  if (input.isCancelled?.()) throw cancelError(input);
+  if (!input.steering?.pending()) return undefined;
+  const outcome = await input.steering.consider();
+  // A decision to stop has already halted the run by the time it is back.
+  if (input.isCancelled?.()) throw cancelError(input);
+  if (!outcome) return undefined;
+  input.log(`Steering from the room (${outcome.decision}): ${logText(outcome.reply)}`);
+  return { messages: [...messages, { role: "user", content: outcome.direction }] };
+}
+
 export function taskPrompt(input: AgentInput, extra: string[]) {
   const standing = input.repoInstructions?.trim();
   return [
@@ -106,6 +171,7 @@ export function taskPrompt(input: AgentInput, extra: string[]) {
     `Task: ${input.card.title}`,
     input.card.body ? `Details:\n${input.card.body}` : "",
     standing ? `Standing instructions for this repo, from the person:\n${standing}` : "",
+    input.steeringNotes?.trim() ?? "",
     ...extra,
   ]
     .filter(Boolean)
@@ -137,6 +203,17 @@ export function revisionPrompt(previous: NonNullable<AgentInput["previous"]>) {
       files.join("\n\n"),
       `Feedback arrived on the pull request:\n${previous.note}`,
       "Address the feedback. Change only what it needs; the rest of the pull request stands.",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  if (previous.resumed) {
+    return [
+      files.length
+        ? "This card was being worked on before and the work was stopped part-way. What had been changed by then is applied in your working directory; it may be unfinished or half-done:"
+        : "This card was being worked on before and the work was stopped before anything was changed.",
+      files.join("\n\n"),
+      previous.note,
     ]
       .filter(Boolean)
       .join("\n\n");

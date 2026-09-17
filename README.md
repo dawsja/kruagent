@@ -93,7 +93,7 @@ card you drop:
 
 | Bot | Job |
 |---|---|
-| **Pip** | Coordinates: picks up cards, answers you in the Team chat, creates cards when asked |
+| **Pip** | Coordinates: picks up cards, answers you in the Team chat, creates, edits, steers, stops and deletes cards when asked |
 | **Momo** | Builds the change in a fresh clone, like a run you start by hand |
 | **Kiko** | Runs the repo's own `lint`, `test` and `build` scripts in that workspace and reports |
 | **Lulu** | Reviews the change with the workspace in hand (reads around it, runs what covers it) and Kiko's report; sends it back to Momo with notes, or passes it |
@@ -146,6 +146,41 @@ model, matches your words loosely against the titles, descriptions and
 summaries of cards waiting in Review, then runs the same approve as the
 button on the card, and Pip posts the pull request link. If the words fit
 more than one card, Pip lists them and you answer with the number.
+
+Typing `@` in the message box lists the crew, with each bot's name and
+job; letters narrow it (`@mo` leaves Momo), the arrows move through it,
+Enter or Tab puts the name in, and Escape closes it.
+
+**Steering.** What you say to a bot while it has a card reaches it inside
+that run instead of waiting for the run to end: "@momo use CSS variables,
+not a second stylesheet", "@kiko skip the e2e suite", "@momo stop". The
+message waits on the card until the bot's next safe point (between two
+steps of Momo's work, between two of Kiko's commands, around Lulu's review
+and Bibi's write-up), where the bot reads it and decides: carry on
+unchanged, adjust its approach, switch direction, or stop. It answers in
+the room with what it understood and what it is doing now. A change of
+course stays with the card, so a later round of Momo, Lulu's review and
+Bibi's summary all work from it; a switch that arrives after the build
+sends the change back to Momo. On a Claude Code card, a note that changes
+the work ends the CLI between two tool calls and starts it again in the
+same workspace with the note; one that changes nothing never interrupts it.
+
+Told to stop or pause, the run halts there. The card goes back to Drop
+marked **stopped**, keeping what had been changed so far, and running it
+again (the card's button, or "@pip run it again") continues from that work
+rather than starting over. A message to a bot that isn't working a card is
+answered as before.
+
+Pip manages cards in flight too: "@pip tell Momo to also cover logout on
+the login card" passes a steering note on, "pause the login card" stops it
+the same restartable way, "change the login card's title to …" edits a
+card in Drop or while it runs (a running card's bot gets the edit as a
+steering note), and "delete the login card" removes it, stopping its run
+and cleaning up its workspace first. Deleting never touches GitHub, so Pip
+won't delete a card whose pull request is open until you've been told and
+say to go ahead anyway. Every one of those tools reports exactly what
+happened, including "nothing was running", and Pip repeats that rather
+than guessing.
 
 Asking for changes works the same way: name the card loosely and say what
 should be different, as in "on the landing page one, make the hero smaller"

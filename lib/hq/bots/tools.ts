@@ -29,7 +29,8 @@ import { cleanLabel } from "../issue-sync-logic";
 import { randomString } from "../oauth";
 import { prOwners } from "../pr-sync-logic";
 import { defaultCardModel, findModel, listModelsText, switchCardModel, switchChatModel } from "./models";
-import { beginRun, claimForRevision, runProblem } from "../runs";
+import { beginRun, claimForRevision, releaseWorkspace, retryOf, runProblem } from "../runs";
+import { editCard, removeCard, steerCard, stopCard, type CardOpsDeps } from "./card-ops";
 import type { Bot } from "./registry";
 import { MAX_CHAIN } from "./chat-logic";
 import { postBotMessage, postEvent } from "./room";
@@ -54,7 +55,12 @@ export const TOOL_NOTES = [
   "list_models shows the numbered list of models this Kru can use right now. use_model switches by name, loosely spelled (\"grok sub\", \"claude opus 5\", \"gpt api\", or a number from the list): target chat switches what the crew chats with, target card switches one card. If it says the name is ambiguous or unknown, show the person the options it gave.",
   "create_card takes a model by the same loose names; left out, the card gets the crew's model.",
   "create_card starts work: with the crew on, Momo picks the card up within seconds. Don't also call run_card.",
-  "run_card restarts a card that stopped, errored, or was moved back to Drop. revise_run sends a card waiting for approval back to Momo with notes.",
+  "run_card restarts a card that stopped, errored, or was moved back to Drop; a card stopped part-way (stop_card, or the person telling the working bot to stop) continues from the work it had. revise_run sends a card waiting for approval back to Momo with notes.",
+  "edit_card changes a card's title or details by id, in Drop or while it runs; on a running card the edit also reaches the working bot as a steering note. Repo and model only change while nothing is working on the card.",
+  "steer_card passes a note to whichever bot has a card right now (\"tell Momo to also do X on the dark mode card\"): the bot reads it at its next safe point, answers in the room, and carries on, changes course or stops. It only works on a card that is being worked on; the result says whether it was delivered. Delivered is not done: say the note is on its way, not that the work changed.",
+  "stop_card (pause_card is the same) halts a running card without deleting it: back to Drop, marked stopped, work so far kept, restartable with run_card. Use it when the person says stop, pause or hold a card.",
+  "delete_card removes a card by id, stopping its run and cleaning its workspace first if it is in flight. It never touches GitHub. If the card has an open pull request it refuses: tell the person, and only pass confirmOpenPullRequest after they say to delete it anyway. Deleting can't be undone; when it is unclear which card is meant, ask.",
+  "Report what a tool's result says, nothing more. If it says NOT stopped, NOT deleted, NOT delivered or NOT changed, tell the person that and why; never say a card was stopped, deleted, edited or steered unless the result says so.",
   "follow_up_pr starts a follow-up on a card whose pull request is open: Momo continues on the pull request's own branch with the note, and the result waits in Review to be pushed to that pull request (or is pushed at once when auto-push is on). Feedback GitHub sent on the pull request starts a follow-up by itself; don't start another for it.",
   "set_crew_setting changes a crew setting, only when the person asks: auto_push (follow-ups pushed without Approve), issue_pickup (labelled GitHub issues become cards), issue_label (which label).",
   "import_issue turns one GitHub issue into a card by number (\"grab issue 42 from owner/repo\"). The card's pull request closes the issue. Don't also call create_card or run_card for it.",
@@ -66,6 +72,13 @@ export const TOOL_NOTES = [
 export function botTools(context: { bot: Bot; message: ChatMessage }) {
   const { bot, message } = context;
   const depth = message.depth + 1;
+  const ops: CardOpsDeps = {
+    newId: () => randomString(9),
+    say: (text, cardId) => {
+      postEvent("pip", text, cardId);
+    },
+    releaseWorkspace,
+  };
 
   return {
     list_cards: tool({
@@ -80,7 +93,8 @@ export function botTools(context: { bot: Bot; message: ChatMessage }) {
             const job = jobs.get(card.id);
             const crew = job ? ` · crew: ${job.stage}${job.error ? ` (${job.error})` : ""}` : "";
             const issue = card.issueNumber ? ` · issue #${card.issueNumber}` : "";
-            return `${card.id} · "${card.title}" · ${card.column} · ${card.status} · ${card.repo ?? "no repo"} · ${card.model ?? "no model"}${issue}${crew}`;
+            const state = card.stopped && card.status === "open" ? `stopped part-way (${card.stopped})` : card.status;
+            return `${card.id} · "${card.title}" · ${card.column} · ${state} · ${card.repo ?? "no repo"} · ${card.model ?? "no model"}${issue}${crew}`;
           })
           .join("\n");
       },
@@ -147,8 +161,54 @@ export function botTools(context: { bot: Bot; message: ChatMessage }) {
         if (problem) return `Can't run it: ${problem}`;
         if (card.column !== "drop" || card.status !== "open") patchCard(card.id, { column: "drop", status: "open" });
         const job = claimDropCard(card.id, null, randomString(9));
-        return job ? `Queued "${card.title}"; Momo picks it up on the next tick.` : "Couldn't queue it; try again.";
+        if (!job) return "Couldn't queue it; try again.";
+        const resumed = card.stopped && retryOf(card) ? " It was stopped part-way, so she continues from the work it had." : "";
+        return `Queued "${card.title}"; Momo picks it up on the next tick.${resumed}`;
       },
+    }),
+    edit_card: tool({
+      description:
+        "Change a card by id: its title, its details (body replaces the old details), and, only while nothing is working on it, its repo or model. Works in Drop and while the card runs; on a running card the edit is also delivered to the working bot as a steering note. The result says what changed and what didn't.",
+      inputSchema: z.object({
+        cardId: z.string(),
+        title: z.string().min(1).max(200).optional(),
+        body: z.string().max(4000).optional(),
+        repo: z.string().optional(),
+        model: z.string().optional(),
+      }),
+      execute: async ({ cardId, title, body, repo, model }) => {
+        let ref: string | null = null;
+        if (model?.trim()) {
+          const found = await findModel(model);
+          if (!found.ok || !found.ref) return `Nothing was edited: ${found.message}`;
+          ref = found.ref;
+        }
+        return editCard({ cardId, title, body, repo, model: ref, by: bot.id, messageId: message.id }, ops);
+      },
+    }),
+    steer_card: tool({
+      description:
+        "Pass a steering note to whichever bot is working a card right now, by card id. The bot pauses at its next safe point, reads it, answers in the room, and carries on, adjusts, switches direction or stops. Write the note as the instruction itself, with what the person wants. The result says whether it was delivered; it isn't when nothing is running on the card.",
+      inputSchema: z.object({ cardId: z.string(), note: z.string().min(1).max(4000) }),
+      execute: async ({ cardId, note }) => steerCard({ cardId, note, author: bot.id, messageId: message.id }, ops),
+    }),
+    stop_card: tool({
+      description:
+        "Halt a card that is being worked on, without deleting it: the run stops, the card goes back to Drop marked stopped with its work so far kept, and run_card restarts it from there. The result says whether anything was stopped.",
+      inputSchema: z.object({ cardId: z.string(), reason: z.string().max(300).optional() }),
+      execute: async ({ cardId, reason }) => stopCard({ cardId, reason, by: bot.id }, ops),
+    }),
+    pause_card: tool({
+      description: "The same as stop_card: pause a running card so it can be restarted later with run_card.",
+      inputSchema: z.object({ cardId: z.string(), reason: z.string().max(300).optional() }),
+      execute: async ({ cardId, reason }) => stopCard({ cardId, reason, by: bot.id }, ops),
+    }),
+    delete_card: tool({
+      description:
+        "Delete a card by id, with its runs and history. A card in flight is stopped first and its workspace cleaned up. Never touches GitHub. Refuses when the card has an open pull request, unless confirmOpenPullRequest is true, which is only for after the person was told about the pull request and said to delete anyway. Can't be undone.",
+      inputSchema: z.object({ cardId: z.string(), confirmOpenPullRequest: z.boolean().optional() }),
+      execute: async ({ cardId, confirmOpenPullRequest }) =>
+        removeCard({ cardId, confirmOpenPullRequest, askedByPerson: message.author === "you" }, ops),
     }),
     revise_run: tool({
       description: "Send a card that is waiting for approval back to Momo with a note saying what should change.",

@@ -1,3 +1,4 @@
+import { resumeNote } from "./bots/steering-logic.ts";
 import type { BotId, Card, FollowUpReason, Run } from "./types.ts";
 
 /*
@@ -47,9 +48,15 @@ export function inheritedFollowUp(of: Run | undefined): FollowUp | null {
  * What a retry of the card's last run continues from. A follow-up that
  * failed is retried as the same follow-up, on the pull request's branch
  * with the same request; a fresh run instead would open a second pull
- * request. Anything else starts over.
+ * request. A run that was stopped to be restarted later (a steering stop,
+ * Pip's stop_card) is continued from the changes it had made, on its pull
+ * request's branch if it was on one. Anything else starts over.
  */
 export function retryBase(last: Run | null): { of: Run; note: string } | undefined {
+  if (last?.status === "cancelled" && last.stoppedNote) {
+    if (last.prState === "closed" || last.prState === "merged") return undefined;
+    return { of: last, note: resumeNote(last.stoppedNote) };
+  }
   if (!last || last.status !== "error" || !last.prUrl || !last.headBranch) return undefined;
   if (last.prState === "closed" || last.prState === "merged") return undefined;
   return { of: last, note: last.revisionNote ?? "Continue the follow-up on the pull request." };
@@ -76,9 +83,11 @@ export function newRun(
     log: revision
       ? [
           "Agent started",
-          followUp && (revision.of.status === "approved" || revision.of.status === "error")
-            ? `Following up on pull request${followUp.prNumber ? ` #${followUp.prNumber}` : ""}. Request: ${revision.note}`
-            : `Revising the previous result. Request: ${revision.note}`,
+          revision.of.stoppedNote
+            ? `Restarting from where the work was stopped (${revision.of.stoppedNote})`
+            : followUp && (revision.of.status === "approved" || revision.of.status === "error")
+              ? `Following up on pull request${followUp.prNumber ? ` #${followUp.prNumber}` : ""}. Request: ${revision.note}`
+              : `Revising the previous result. Request: ${revision.note}`,
         ]
       : ["Agent started"],
     proposedWrites: [],

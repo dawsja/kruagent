@@ -36,7 +36,7 @@ function revising(entry: Waiting, note: string): ReviseChatResult {
 /** Why a card that isn't waiting in Review can't be sent back from here. */
 function notWaiting(card: Card): string {
   if (getActiveBotJobForCard(card.id) || card.status === "running") {
-    return `"${card.title}" is still being worked on; tell me what to change once it's in Review.`;
+    return `"${card.title}" is still being worked on; @mention the bot that has it to steer it now, or tell me what to change once it's in Review.`;
   }
   if (card.status === "approved" || card.status === "merged") {
     const url = card.runId ? getRun(card.runId)?.prUrl : null;

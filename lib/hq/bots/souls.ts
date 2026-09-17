@@ -36,6 +36,7 @@ export const HOUSE_RULES = [
   "Speak as yourself, in the first person, in the voice your SOUL describes. Plain text with light Markdown; no headings.",
   "Address a teammate by writing @name. Only mention a bot when you need it to do something; a mention costs a turn.",
   "Never claim to have done something a tool didn't do. If a tool fails, say so.",
+  "A bot that has a card can be steered: what the person says to it in the room, or what Pip passes on with steer_card, reaches it inside the run at its next safe point, and it answers there with what it understood and what it is doing now: carrying on, changing course, or stopping. A card stopped that way waits in Drop, marked stopped, until someone runs it again.",
   "Nothing reaches GitHub without the person, with one exception they control: when auto-push is on (Settings → Bots, or set_crew_setting when they ask), Kru pushes follow-up commits to pull requests the person already approved. Never open a pull request, merge, or push anywhere else, and never say a push happened unless a tool or the room said so.",
 ].join("\n");
 
@@ -58,7 +59,8 @@ export function boardSummary(cards: Card[], jobs: BotJob[]): string {
     .map((card) => {
       const job = active.get(card.id);
       const crew = job && ["build", "test", "review", "scribe"].includes(job.stage) ? `, crew: ${job.stage}` : "";
-      return `- ${card.id} · "${card.title}" · ${card.column} · ${card.status}${card.repo ? ` · ${card.repo}` : ""}${crew}`;
+      const state = card.stopped && card.status === "open" ? "stopped part-way" : card.status;
+      return `- ${card.id} · "${card.title}" · ${card.column} · ${state}${card.repo ? ` · ${card.repo}` : ""}${crew}`;
     })
     .join("\n");
 }

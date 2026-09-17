@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ClipboardEvent,
@@ -19,6 +21,14 @@ import {
 import { BotAvatar } from "@/components/hq/bot-avatar";
 import { postChatEvent, useChatEvents, useSharedDraft } from "@/components/hq/chat-window";
 import { pollInterval, useLiveEvents } from "@/components/hq/live-events";
+import {
+  filterMentions,
+  insertMention,
+  mentionTokenAt,
+  pickerKey,
+  pickerOpen,
+  type MentionOption,
+} from "@/components/hq/mention-picker-logic";
 import { KruBot } from "@/components/hq/kru-bot";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -41,7 +51,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ACCEPT, checkFiles, formatBytes, kindOf, MAX_ATTACHMENTS } from "@/lib/hq/bots/attachments";
 import { MENTION } from "@/lib/hq/bots/chat-logic";
-import { BOTS, getBot } from "@/lib/hq/bots/registry";
+import { BOTS, getBot, type Bot } from "@/lib/hq/bots/registry";
 import { parseInline, type Inline } from "@/lib/hq/markdown";
 import { isBotId, type ChatAttachment, type ChatMessage } from "@/lib/hq/types";
 import { botInk } from "@/lib/theme/bot-color";
@@ -482,6 +492,7 @@ function Composer({
   const picker = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const full = room.files.length >= MAX_ATTACHMENTS;
+  const mentions = useMentionPicker(room, textarea);
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     const pasted = Array.from(event.clipboardData.files);
@@ -512,70 +523,238 @@ function Composer({
       className="border-t border-fog p-3"
     >
       {room.notice ? <p className="mb-2 text-[12px] text-amber">{room.notice}</p> : null}
-      <InputGroup className={cn("rounded-2xl border-fog bg-linen", dragging && "border-ash border-dashed")}>
-        {room.files.length ? (
-          <InputGroupAddon align="block-start" className="flex-wrap justify-start gap-1.5 pb-0">
-            {room.files.map((item, index) => (
-              <PendingFile key={item.preview ?? `${item.file.name}-${item.file.lastModified}-${index}`} item={item} onRemove={() => room.detach(index)} />
-            ))}
-          </InputGroupAddon>
+      {/* The picker hangs off the message box, so it has to be positioned against it. */}
+      <div className="relative">
+        {mentions.open ? (
+          <MentionList
+            id={mentions.listId}
+            bots={mentions.matches}
+            active={mentions.active}
+            onHighlight={mentions.setHighlight}
+            onPick={mentions.pick}
+          />
         ) : null}
-        <InputGroupTextarea
-          ref={textarea}
-          value={room.draft}
-          onChange={(event) => room.setDraft(event.target.value)}
-          onKeyDown={room.onKey}
-          onPaste={onPaste}
-          placeholder="Message the crew… (Enter sends, Shift+Enter for a new line)"
-          rows={2}
-          autoFocus={autoFocus}
-          aria-label="Message"
-        />
-        <InputGroupAddon align="block-end" className="justify-between">
-          <MentionBar room={room} />
-          <div className="flex shrink-0 items-center gap-1">
-            <input
-              ref={picker}
-              type="file"
-              multiple
-              accept={ACCEPT}
-              className="hidden"
-              onChange={(event) => {
-                room.attach(Array.from(event.target.files ?? []));
-                // Picking the same file again after removing it still fires.
-                event.target.value = "";
-              }}
-            />
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <InputGroupButton
-                    size="icon-sm"
-                    aria-label="Attach files"
-                    disabled={room.sending || full}
-                    onClick={() => picker.current?.click()}
-                  />
-                }
+        <InputGroup className={cn("rounded-2xl border-fog bg-linen", dragging && "border-ash border-dashed")}>
+          {room.files.length ? (
+            <InputGroupAddon align="block-start" className="flex-wrap justify-start gap-1.5 pb-0">
+              {room.files.map((item, index) => (
+                <PendingFile key={item.preview ?? `${item.file.name}-${item.file.lastModified}-${index}`} item={item} onRemove={() => room.detach(index)} />
+              ))}
+            </InputGroupAddon>
+          ) : null}
+          <InputGroupTextarea
+            ref={textarea}
+            value={room.draft}
+            onChange={(event) => {
+              room.setDraft(event.target.value);
+              mentions.onCaret(event.target);
+            }}
+            // The picker gets the key first: while it is open, Enter picks a
+            // bot instead of sending, and the arrows move its highlight.
+            onKeyDown={(event) => {
+              if (!mentions.onKeyDown(event)) room.onKey(event);
+            }}
+            // The caret also moves without the text changing (arrows, Home, a
+            // click), and leaving the @ token that way closes the picker.
+            onSelect={(event) => mentions.onCaret(event.currentTarget)}
+            onKeyUp={(event) => mentions.onCaret(event.currentTarget)}
+            onClick={(event) => mentions.onCaret(event.currentTarget)}
+            onFocus={(event) => mentions.onCaret(event.currentTarget)}
+            onBlur={mentions.onBlur}
+            onPaste={onPaste}
+            placeholder="Message the crew… (@ to mention a bot, Enter sends, Shift+Enter for a new line)"
+            rows={2}
+            autoFocus={autoFocus}
+            aria-label="Message"
+            role="combobox"
+            aria-haspopup="listbox"
+            aria-autocomplete="list"
+            aria-expanded={mentions.open}
+            aria-controls={mentions.open ? mentions.listId : undefined}
+            aria-activedescendant={mentions.open ? mentionOptionId(mentions.listId, mentions.matches[mentions.active].id) : undefined}
+          />
+          <InputGroupAddon align="block-end" className="justify-between">
+            <MentionBar room={room} />
+            <div className="flex shrink-0 items-center gap-1">
+              <input
+                ref={picker}
+                type="file"
+                multiple
+                accept={ACCEPT}
+                className="hidden"
+                onChange={(event) => {
+                  room.attach(Array.from(event.target.files ?? []));
+                  // Picking the same file again after removing it still fires.
+                  event.target.value = "";
+                }}
+              />
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <InputGroupButton
+                      size="icon-sm"
+                      aria-label="Attach files"
+                      disabled={room.sending || full}
+                      onClick={() => picker.current?.click()}
+                    />
+                  }
+                >
+                  <Paperclip />
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {full ? `Up to ${MAX_ATTACHMENTS} files per message` : "Attach images, PDFs or text for the crew to read"}
+                </TooltipContent>
+              </Tooltip>
+              <InputGroupButton
+                type="submit"
+                variant="default"
+                size="icon-sm"
+                disabled={room.sending || (!room.draft.trim() && room.files.length === 0)}
+                aria-label="Send"
               >
-                <Paperclip />
-              </TooltipTrigger>
-              <TooltipContent side="top">
-                {full ? `Up to ${MAX_ATTACHMENTS} files per message` : "Attach images, PDFs or text for the crew to read"}
-              </TooltipContent>
-            </Tooltip>
-            <InputGroupButton
-              type="submit"
-              variant="default"
-              size="icon-sm"
-              disabled={room.sending || (!room.draft.trim() && room.files.length === 0)}
-              aria-label="Send"
-            >
-              <SendHorizonal />
-            </InputGroupButton>
-          </div>
-        </InputGroupAddon>
-      </InputGroup>
+                <SendHorizonal />
+              </InputGroupButton>
+            </div>
+          </InputGroupAddon>
+        </InputGroup>
+      </div>
     </form>
+  );
+}
+
+function mentionOptionId(listId: string, botId: string) {
+  return `${listId}-${botId}`;
+}
+
+/**
+ * The @ picker's state for one message box: the token under the caret, the
+ * bots it matches from the crew's own list, and which one is highlighted.
+ * The rules are in mention-picker-logic.ts; this keeps them in step with the
+ * textarea, which owns the caret.
+ */
+function useMentionPicker(room: Room, textarea: RefObject<HTMLTextAreaElement | null>) {
+  const listId = useId();
+  const [caret, setCaret] = useState(0);
+  const [focused, setFocused] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  // The token Escape closed the picker on, by where its @ is.
+  const [dismissed, setDismissed] = useState<number | null>(null);
+  // Where the caret goes once the draft with the inserted mention has rendered.
+  const pendingCaret = useRef<number | null>(null);
+
+  const token = focused ? mentionTokenAt(room.draft, caret) : null;
+  const matches: Bot[] = token ? filterMentions(BOTS, token.query) : [];
+  const open = pickerOpen({ token, matches }, dismissed);
+  const active = Math.min(highlight, Math.max(0, matches.length - 1));
+
+  // A different word to complete starts from the top of its own list.
+  const key = token ? `${token.start}:${token.query}` : null;
+  const [lastKey, setLastKey] = useState(key);
+  if (key !== lastKey) {
+    setLastKey(key);
+    setHighlight(0);
+    // Leaving the token forgets that it was dismissed; a new @ opens again.
+    if (!token || token.start !== dismissed) setDismissed(null);
+  }
+
+  useLayoutEffect(() => {
+    const at = pendingCaret.current;
+    if (at === null) return;
+    pendingCaret.current = null;
+    textarea.current?.focus();
+    textarea.current?.setSelectionRange(at, at);
+  }, [room.draft, textarea]);
+
+  function pick(option: MentionOption) {
+    if (!token) return;
+    const next = insertMention(room.draft, token, option.id);
+    pendingCaret.current = next.caret;
+    room.setDraft(next.text);
+    setCaret(next.caret);
+    setFocused(true);
+  }
+
+  /** True when the key was the picker's, and the message box should leave it alone. */
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (!open || event.nativeEvent.isComposing) return false;
+    const action = pickerKey(
+      { token, matches, highlight: active },
+      event.key,
+      { shift: event.shiftKey, alt: event.altKey, ctrl: event.ctrlKey, meta: event.metaKey },
+    );
+    if (!action) return false;
+    event.preventDefault();
+    // Escape closes the list, not the panel the chat sits in.
+    event.stopPropagation();
+    if (action.kind === "move") setHighlight(action.highlight);
+    else if (action.kind === "insert") pick(action.option);
+    else setDismissed(token?.start ?? null);
+    return true;
+  }
+
+  return {
+    listId,
+    open,
+    matches,
+    active,
+    setHighlight,
+    pick,
+    onKeyDown,
+    onCaret: (element: HTMLTextAreaElement) => {
+      setFocused(true);
+      setCaret(element.selectionStart ?? 0);
+    },
+    onBlur: () => setFocused(false),
+  };
+}
+
+/** The list the @ picker shows above the message box: each bot's face, name and job. */
+function MentionList({
+  id,
+  bots,
+  active,
+  onHighlight,
+  onPick,
+}: {
+  id: string;
+  bots: Bot[];
+  active: number;
+  onHighlight: (index: number) => void;
+  onPick: (bot: Bot) => void;
+}) {
+  return (
+    <ul
+      id={id}
+      role="listbox"
+      aria-label="Mention a bot"
+      className="absolute bottom-full left-0 z-50 mb-2 w-64 max-w-full overflow-hidden rounded-xl border border-fog bg-paper-white p-1 shadow-subtle-3"
+    >
+      {bots.map((bot, index) => (
+        <li
+          key={bot.id}
+          id={mentionOptionId(id, bot.id)}
+          role="option"
+          aria-selected={index === active}
+          // Keeps the caret in the message box while the mouse picks.
+          onMouseDown={(event) => event.preventDefault()}
+          onMouseEnter={() => onHighlight(index)}
+          onClick={() => onPick(bot)}
+          className={cn(
+            "flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] tracking-[-0.32px] text-carbon",
+            index === active && "bg-mist",
+          )}
+        >
+          <span aria-hidden="true" className="inline-flex">
+            <BotAvatar bot={bot} size={20} />
+          </span>
+          <span className="font-medium" style={{ color: botInk(bot.color) }}>
+            {bot.name}
+          </span>
+          <span className="truncate text-[12px] text-ash">{bot.role}</span>
+          <span className="ml-auto font-mono text-[11px] text-ash">@{bot.id}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

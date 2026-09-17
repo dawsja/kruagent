@@ -26,6 +26,7 @@ import {
   type BoxConfig,
   type ClaudeCheck,
 } from "./box.ts";
+import { continuationSection, progressLines, type SteerOutcome } from "./bots/steering-logic.ts";
 import { parseModelRef } from "./models.ts";
 import { validateProposedWrites } from "./proposed-writes.ts";
 import { createRedactor } from "./redact.ts";
@@ -42,8 +43,12 @@ import { createRedactor } from "./redact.ts";
  * the box desktop; here we only ask the box whether that has happened.
  */
 
-/** How often a running card is checked for cancellation. */
+/** How often a running card is checked for cancellation and for steering notes. */
 const CANCEL_POLL_MS = 2_000;
+/** Longest a note that changes the work waits for a tool call to end before the CLI is interrupted anyway. */
+const STEER_BREAK_MS = 90_000;
+/** A continuation always gets at least this long, however little of the run's time is left. */
+const MIN_CONTINUE_MS = 60_000;
 
 /**
  * The CLI's version of the box instructions: same rules, minus the tools
@@ -187,6 +192,18 @@ export function readStreamLine(line: string, runId?: string): {
   return { log };
 }
 
+/**
+ * True for the stream line that carries a tool's result back to the model:
+ * between that and the model's next request, nothing is half-done.
+ */
+export function isToolResultLine(line: string): boolean {
+  try {
+    return (JSON.parse(line) as StreamEvent).type === "user";
+  } catch {
+    return false;
+  }
+}
+
 const SIGN_IN_TEXT = /not logged in|please run \/login|invalid api key|authentication|unauthori[sz]ed|oauth token/i;
 
 /**
@@ -238,69 +255,147 @@ export async function runCardClaudeCode(input: AgentInput): Promise<AgentResult>
   }
 
   input.log(`Running Claude Code (${model})`);
-  const stop = new AbortController();
-  let cancelled = false;
-  const poll = setInterval(() => {
-    if (input.isCancelled?.()) {
-      cancelled = true;
-      stop.abort();
-    }
-  }, CANCEL_POLL_MS);
+  const deadline = Date.now() + BOX_RUN_TIMEOUT_MS;
+  // What this run logged while the CLI worked: a restarted CLI remembers
+  // nothing, so a continuation is told what was done from here.
+  const progress: string[] = [];
+  const say = (text: string) => {
+    progress.push(text);
+    input.log(text);
+  };
+  let prompt = taskPrompt(input, [previous ? revisionPrompt(previous) : FRESH_START]);
+  // Every change of direction this run has taken, oldest first.
+  const directions: string[] = [];
 
   // Filled in from the stream's closing event; a holder, since the
   // assignment happens inside the callback.
   const seen: { result: { text: string; isError: boolean } | null } = { result: null };
   let stderr = "";
   let exit: Awaited<ReturnType<typeof runClaudeInWorkspace>> = null;
-  try {
-    exit = await runClaudeInWorkspace(
-      box,
-      id,
-      {
-        model,
-        prompt: taskPrompt(input, [previous ? revisionPrompt(previous) : FRESH_START]),
-        systemPrompt: CLAUDE_CODE_INSTRUCTIONS,
-        timeoutMs: BOX_RUN_TIMEOUT_MS,
-      },
-      {
-        signal: stop.signal,
-        onEvent: (event) => {
-          if (event.type === "line") {
-            const read = readStreamLine(event.line, id);
-            for (const line of read.log) input.log(line);
-            if (read.result) seen.result = read.result;
-          } else if (event.type === "stderr") {
-            stderr = (stderr + event.text).slice(-2_000);
+  let stopped = false;
+
+  // One pass per CLI process. The CLI takes a single prompt, so a steering
+  // note that changes the work ends the process between two tool calls and
+  // starts another in the same workspace with the note; one that changes
+  // nothing never interrupts it.
+  for (;;) {
+    const stop = new AbortController();
+    const turn: { cancelled: boolean; redirect: SteerOutcome | null; breakBy: number; considering: Promise<void> | null } = {
+      cancelled: false,
+      redirect: null,
+      breakBy: 0,
+      considering: null,
+    };
+    const consider = () => {
+      if (turn.considering || turn.redirect || !input.steering?.pending()) return;
+      turn.considering = input.steering
+        .consider()
+        .then((outcome) => {
+          if (!outcome) return;
+          input.log(`Steering from the room (${outcome.decision}): ${logText(outcome.reply)}`);
+          if (outcome.decision === "adjust" || outcome.decision === "switch") {
+            turn.redirect = outcome;
+            turn.breakBy = Date.now() + STEER_BREAK_MS;
           }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          turn.considering = null;
+        });
+    };
+    const poll = setInterval(() => {
+      if (input.isCancelled?.()) {
+        turn.cancelled = true;
+        stop.abort();
+      } else if (turn.redirect) {
+        // No tool call ended in time (a long build, say): interrupt anyway.
+        if (Date.now() >= turn.breakBy) stop.abort();
+      } else {
+        consider();
+      }
+    }, CANCEL_POLL_MS);
+
+    seen.result = null;
+    stderr = "";
+    let failure: unknown = null;
+    try {
+      exit = await runClaudeInWorkspace(
+        box,
+        id,
+        {
+          model,
+          prompt,
+          systemPrompt: CLAUDE_CODE_INSTRUCTIONS,
+          timeoutMs: Math.max(MIN_CONTINUE_MS, deadline - Date.now()),
         },
-      },
-    );
-  } catch (error) {
+        {
+          signal: stop.signal,
+          onEvent: (event) => {
+            if (event.type === "line") {
+              const read = readStreamLine(event.line, id);
+              for (const line of read.log) say(line);
+              if (read.result) seen.result = read.result;
+              // A tool just answered and the model hasn't asked for the
+              // next one: the safe point to interrupt at.
+              if (turn.redirect && isToolResultLine(event.line)) stop.abort();
+            } else if (event.type === "stderr") {
+              stderr = (stderr + event.text).slice(-2_000);
+            }
+          },
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
     clearInterval(poll);
-    await deleteWorkspace(box, id).catch(() => undefined);
-    if (cancelled || input.isCancelled?.()) throw new RunCancelledError();
-    const detail = error instanceof Error ? error.message : "unknown error";
-    throw new Error(`Claude Code failed: ${redactPatterns(detail).slice(0, 300)}`);
-  }
-  clearInterval(poll);
+    // A note being read when the CLI ended, or one that arrived as it did.
+    await turn.considering;
+    if (!turn.redirect && !turn.cancelled && !input.isCancelled?.()) {
+      consider();
+      await turn.considering;
+    }
 
-  if (cancelled || input.isCancelled?.()) {
-    await deleteWorkspace(box, id).catch(() => undefined);
-    throw new RunCancelledError();
+    if (turn.cancelled || input.isCancelled?.()) {
+      // Stopped to be restarted later: what it changed so far is collected.
+      if (input.isStopped?.()) {
+        stopped = true;
+        break;
+      }
+      await deleteWorkspace(box, id).catch(() => undefined);
+      throw new RunCancelledError();
+    }
+    if (turn.redirect) {
+      directions.push(turn.redirect.direction);
+      prompt = taskPrompt(input, [
+        previous ? revisionPrompt(previous) : "",
+        continuationSection(directions.join("\n\n"), progressLines(progress)),
+      ]);
+      input.log("Continuing in the same workspace with the new direction");
+      continue;
+    }
+    if (failure) {
+      await deleteWorkspace(box, id).catch(() => undefined);
+      const detail = failure instanceof Error ? failure.message : "unknown error";
+      throw new Error(`Claude Code failed: ${redactPatterns(detail).slice(0, 300)}`);
+    }
+    break;
   }
 
-  const final = seen.result;
-  const timedOut = Boolean(exit?.timedOut);
-  if (!timedOut && (final?.isError || (!final && exit && exit.code !== 0))) {
+  // Assigned in the stream callback, which the compiler can't see from here.
+  const final = seen.result as { text: string; isError: boolean } | null;
+  const timedOut = !stopped && Boolean(exit?.timedOut);
+  if (!stopped && !timedOut && (final?.isError || (!final && exit && exit.code !== 0))) {
     await deleteWorkspace(box, id).catch(() => undefined);
     const text = final?.text.trim() || stderr.trim() || `exit ${exit?.code ?? "?"}`;
     if (SIGN_IN_TEXT.test(text)) throw new Error(CLAUDE_SIGN_IN_MESSAGE);
     throw new Error(`Claude Code failed: ${redactPatterns(text.replace(/\s*\n\s*/g, " ")).slice(0, 300)}`);
   }
 
-  const summary = final && !final.isError ? final.text.trim() || null : null;
+  const summary = !stopped && final && !final.isError ? final.text.trim() || null : null;
   let warning: string | null = null;
-  if (timedOut) {
+  if (stopped) {
+    // Nobody reviews a stopped run; the card's next run continues it.
+  } else if (timedOut) {
     warning = `The agent ran out of time (${BOX_RUN_TIMEOUT_MS / 60_000} minutes) before saying it was done. ${REVIEW_CAREFULLY}`;
   } else if (!summary) {
     warning = `The agent stopped without saying it was done. ${REVIEW_CAREFULLY}`;
@@ -317,7 +412,7 @@ export async function runCardClaudeCode(input: AgentInput): Promise<AgentResult>
     const { writes, skipped } = changesToWrites(files, message);
     for (const item of skipped) input.log(`Skipped ${item}`);
     // Left standing for a revision or a shell, like the other runner's.
-    return { writes: validateProposedWrites(writes), warning, summary };
+    return { writes: validateProposedWrites(writes), warning, summary, ...(stopped ? { stopped } : {}) };
   } catch (error) {
     if (changed === 0) {
       await deleteWorkspace(box, id).catch(() => undefined);

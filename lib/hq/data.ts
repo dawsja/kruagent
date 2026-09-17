@@ -26,6 +26,8 @@ import {
   type PrFeedbackKind,
   type ProposedWrite,
   type Run,
+  type SteerDecision,
+  type SteeringNote,
 } from "./types.ts";
 
 /*
@@ -204,6 +206,7 @@ function toCard(row: Row): Card {
     runId: text(row.run_id),
     issueNumber: integer(row.issue_number),
     issueUrl: text(row.issue_url),
+    stopped: text(row.stopped),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -290,7 +293,7 @@ export function wasIssueImported(repo: string, number: number): boolean {
 }
 
 export type CardPatch = Partial<
-  Pick<Card, "title" | "body" | "column" | "repo" | "model" | "status" | "runId">
+  Pick<Card, "title" | "body" | "column" | "repo" | "model" | "status" | "runId" | "stopped">
 >;
 
 const CARD_COLUMNS: Record<keyof CardPatch, string> = {
@@ -301,6 +304,7 @@ const CARD_COLUMNS: Record<keyof CardPatch, string> = {
   model: "model",
   status: "status",
   runId: "run_id",
+  stopped: "stopped",
 };
 
 function applyCardPatch(d: DatabaseSync, id: string, patch: CardPatch, at: string) {
@@ -371,6 +375,7 @@ function toRun(row: Row, log: string[]): Run {
     revisionNote: text(row.revision_note),
     bot: text(row.bot) as BotId | null,
     commitMessage: text(row.commit_message),
+    stoppedNote: text(row.stopped_note),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -442,6 +447,7 @@ export type RunPatch = {
   warning?: string | null;
   summary?: string | null;
   commitMessage?: string | null;
+  stoppedNote?: string | null;
 };
 
 /**
@@ -489,6 +495,7 @@ export function transitionRun(
       ["warning", "warning"],
       ["summary", "summary"],
       ["commitMessage", "commit_message"],
+      ["stoppedNote", "stopped_note"],
     ] as const) {
       if (patch[key] !== undefined) {
         sets.push(`${column} = ?`);
@@ -512,22 +519,26 @@ export function transitionRun(
   });
 }
 
+function insertRunLog(d: DatabaseSync, runId: string, line: string) {
+  const next = d
+    .prepare("SELECT COALESCE(MAX(seq), -1) + 1 AS seq FROM kru_run_logs WHERE run_id = ?")
+    .get(runId) as Row;
+  d.prepare("INSERT INTO kru_run_logs (run_id, seq, line, at) VALUES (?, ?, ?, ?)").run(
+    runId,
+    Number(next.seq),
+    line,
+    now(),
+  );
+  announce({ topic: "run", runId });
+  announce({ topic: "board" });
+}
+
 /** Appends a log line unless the run is gone or cancelled. */
 export function appendRunLog(runId: string, line: string): boolean {
   return write((d) => {
     const run = d.prepare("SELECT status FROM kru_runs WHERE id = ?").get(runId) as Row | undefined;
     if (!run || run.status === "cancelled") return false;
-    const next = d
-      .prepare("SELECT COALESCE(MAX(seq), -1) + 1 AS seq FROM kru_run_logs WHERE run_id = ?")
-      .get(runId) as Row;
-    d.prepare("INSERT INTO kru_run_logs (run_id, seq, line, at) VALUES (?, ?, ?, ?)").run(
-      runId,
-      Number(next.seq),
-      line,
-      now(),
-    );
-    announce({ topic: "run", runId });
-    announce({ topic: "board" });
+    insertRunLog(d, runId, line);
     return true;
   });
 }
@@ -947,6 +958,138 @@ export function releaseBotClaims() {
   write((d) => {
     d.prepare("UPDATE kru_bot_jobs SET claimed_by = NULL WHERE claimed_by IS NOT NULL").run();
     d.prepare("UPDATE kru_chat_messages SET claimed_by = NULL WHERE claimed_by IS NOT NULL").run();
+  });
+}
+
+// ---------- steering ----------
+
+function toSteeringNote(row: Row): SteeringNote {
+  return {
+    id: String(row.id),
+    cardId: String(row.card_id),
+    runId: text(row.run_id),
+    stage: String(row.stage) as BotStage,
+    bot: String(row.bot) as BotId,
+    author: String(row.author) as SteeringNote["author"],
+    body: String(row.body),
+    messageId: text(row.message_id),
+    decision: text(row.decision) as SteerDecision | null,
+    reply: text(row.reply),
+    createdAt: String(row.created_at),
+    deliveredAt: text(row.delivered_at),
+  };
+}
+
+/** Leaves a note for the bot working a card; it reads it at its next safe point. */
+export function insertSteeringNote(note: SteeringNote) {
+  write((d) => {
+    d.prepare(
+      `INSERT INTO kru_steering (id, card_id, run_id, stage, bot, author, body, message_id, decision, reply, created_at, delivered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      note.id,
+      note.cardId,
+      note.runId,
+      note.stage,
+      note.bot,
+      note.author,
+      note.body,
+      note.messageId,
+      note.decision,
+      note.reply,
+      note.createdAt,
+      note.deliveredAt,
+    );
+    announce({ topic: "board" });
+  });
+}
+
+/** True while a note waits on the card. Cheap: a working bot asks at every step. */
+export function hasPendingSteering(cardId: string): boolean {
+  return Boolean(db().prepare("SELECT 1 FROM kru_steering WHERE card_id = ? AND delivered_at IS NULL LIMIT 1").get(cardId));
+}
+
+/**
+ * The notes waiting on a card, oldest first, marked read in the same
+ * transaction: two safe points never both answer the same note.
+ */
+export function takeSteeringNotes(cardId: string): SteeringNote[] {
+  return write((d) => {
+    const rows = d
+      .prepare("SELECT * FROM kru_steering WHERE card_id = ? AND delivered_at IS NULL ORDER BY created_at, rowid")
+      .all(cardId) as Row[];
+    if (rows.length === 0) return [];
+    const at = now();
+    d.prepare("UPDATE kru_steering SET delivered_at = ? WHERE card_id = ? AND delivered_at IS NULL").run(at, cardId);
+    return rows.map((row) => ({ ...toSteeringNote(row), deliveredAt: at }));
+  });
+}
+
+/** What the bot decided about notes it read, and what it said back. */
+export function answerSteeringNotes(ids: string[], decision: SteerDecision, reply: string) {
+  if (ids.length === 0) return;
+  write((d) => {
+    const update = d.prepare("UPDATE kru_steering SET decision = ?, reply = ? WHERE id = ?");
+    for (const id of ids) update.run(decision, reply, id);
+  });
+}
+
+/** Every note a card has had, oldest first; `read` keeps the ones a bot has answered. */
+export function listSteeringNotes(cardId: string, options: { read?: boolean } = {}): SteeringNote[] {
+  const rows = db()
+    .prepare(
+      `SELECT * FROM kru_steering WHERE card_id = ?${options.read ? " AND delivered_at IS NOT NULL AND decision IS NOT NULL" : ""} ORDER BY created_at, rowid`,
+    )
+    .all(cardId) as Row[];
+  return rows.map(toSteeringNote);
+}
+
+export type StoppedWork = {
+  /** The crew's job that was stopped, and the stage it was at. */
+  jobId: string | null;
+  stage: BotStage | null;
+  /** The run that was stopped; its changes so far stay with it. */
+  runId: string | null;
+};
+
+/**
+ * Halts the work on a card without discarding it, in one transaction: the
+ * crew's job ends, the run is cancelled but keeps `note` as the reason it
+ * is to be continued, and the card goes back to Drop saying it was stopped,
+ * where running it again picks the work up. Null when nothing is working
+ * on the card, or its run is opening a pull request and can't be stopped.
+ */
+export function stopCardWork(cardId: string, note: string): StoppedWork | null {
+  return write((d) => {
+    const card = d.prepare("SELECT run_id FROM kru_cards WHERE id = ?").get(cardId) as Row | undefined;
+    if (!card) return null;
+    const job = d
+      .prepare(`SELECT id, stage, run_id FROM kru_bot_jobs WHERE card_id = ? AND stage NOT IN ${TERMINAL_STAGES} LIMIT 1`)
+      .get(cardId) as Row | undefined;
+    const runId = text(job?.run_id) ?? text(card.run_id);
+    const run = runId ? (d.prepare("SELECT id, status FROM kru_runs WHERE id = ? AND card_id = ?").get(runId, cardId) as Row | undefined) : undefined;
+    if (run?.status === "applying") return null;
+    // Without the crew, only a run that is still working can be stopped: one
+    // waiting in Review is the person's to approve, revise or discard.
+    if (!job && run?.status !== "running") return null;
+
+    const at = now();
+    if (job) {
+      d.prepare("UPDATE kru_bot_jobs SET stage = 'cancelled', error = ?, retry_at = NULL, claimed_by = NULL, updated_at = ? WHERE id = ?").run(
+        `Stopped: ${note}`.slice(0, 500),
+        at,
+        String(job.id),
+      );
+    }
+    const live = run && (run.status === "running" || run.status === "needs_approval");
+    if (run && live) {
+      insertRunLog(d, String(run.id), `Stopped, to be restarted later: ${note}`);
+      d.prepare("UPDATE kru_runs SET status = 'cancelled', stopped_note = ?, updated_at = ? WHERE id = ?").run(note, at, String(run.id));
+      announce({ topic: "run", runId: String(run.id) });
+    }
+    applyCardPatch(d, cardId, { column: "drop", status: "open", stopped: note }, at);
+    announce({ topic: "board" });
+    return { jobId: text(job?.id), stage: job ? (String(job.stage) as BotStage) : null, runId: run && live ? String(run.id) : null };
   });
 }
 

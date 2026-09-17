@@ -899,7 +899,7 @@ export function HqBoard({
             <div className="mx-auto flex w-full max-w-5xl items-start justify-between gap-3 px-4 py-4 sm:px-8 sm:py-5">
               <div className="min-w-0">
                 <p className="font-mono text-[11px] uppercase tracking-[-0.32px] text-ash">
-                  {statusLabel(selected.status)}
+                  {statusLabel(selected)}
                 </p>
                 <h2
                   id="card-panel-title"
@@ -936,10 +936,15 @@ export function HqBoard({
                       `Built by the crew · Lulu ${selectedJob.reviewVerdict === "pass" ? "passed it" : "had concerns"}${selectedJob.rounds ? ` after ${selectedJob.rounds} round${selectedJob.rounds === 1 ? "" : "s"}` : ""}`
                     ) : selectedJob.stage === "failed" ? (
                       `The crew stopped: ${selectedJob.error ?? "unknown reason"}`
+                    ) : selected.stopped && selected.status === "open" ? (
+                      "The crew stopped when asked to; running it again continues from the work so far"
                     ) : (
                       "The crew let this one go"
                     )}
                   </p>
+                ) : null}
+                {selected.stopped && selected.status === "open" ? (
+                  <p className="mt-1.5 break-words text-[12px] text-ash">Stopped · {selected.stopped}</p>
                 ) : null}
               </div>
               <Tooltip>
@@ -1597,7 +1602,9 @@ function rememberChoice(repo: string, model: string) {
   }
 }
 
-function statusLabel(status: Card["status"]) {
+function statusLabel({ status, stopped }: Pick<Card, "status" | "stopped">) {
+  // Stopped part-way from the Team room; running it again continues the work.
+  if (status === "open" && stopped) return "stopped";
   if (status === "running") return "running";
   if (status === "needs_approval") return "awaiting approval";
   if (status === "approved") return "PR open";
@@ -1769,14 +1776,14 @@ function BoardCard({
               "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-[-0.32px]",
               card.status === "error"
                 ? "bg-ember/15 text-ember"
-                : unfinished
+                : unfinished || (card.status === "open" && card.stopped)
                   ? "bg-amber/20 text-carbon"
                 : card.status === "approved"
                   ? "bg-sky/15 text-sky"
                   : "bg-mist text-ash",
             )}
           >
-            {unfinished ? "check work" : statusLabel(card.status)}
+            {unfinished ? "check work" : statusLabel(card)}
           </span>
         )}
       </div>
@@ -1845,9 +1852,11 @@ function CardHistory({ runs, currentId }: { runs: RunSummary[]; currentId: strin
           const pushed = run.pushedLine;
           const why = run.followUpReason
             ? `Follow-up (${run.followUpReason === "check" ? "CI failed" : run.followUpReason === "review" ? "review feedback" : "asked by hand"})`
-            : run.revisionNote
-              ? "Sent back"
-              : "Started";
+            : run.revisionOf && runs.find((item) => item.id === run.revisionOf)?.stoppedNote
+              ? "Restarted after a stop"
+              : run.revisionNote
+                ? "Sent back"
+                : "Started";
           return (
             <li key={run.id} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2 text-[12px]">
@@ -1861,7 +1870,7 @@ function CardHistory({ runs, currentId }: { runs: RunSummary[]; currentId: strin
                     run.status === "error" ? "bg-ember/15 text-ember" : run.status === "approved" || run.status === "merged" ? "bg-sky/15 text-sky" : "bg-mist text-ash",
                   )}
                 >
-                  {RUN_STATUS_LABEL[run.status]}
+                  {run.stoppedNote ? "stopped" : RUN_STATUS_LABEL[run.status]}
                 </span>
                 {run.id === currentId ? <span className="text-[11px] text-ash">current</span> : null}
               </div>
