@@ -527,6 +527,7 @@ With the box running like that, put `KRU_BOX_URL=http://127.0.0.1:8787` and
 ## AI Disclaimer
 
 AI was used to write a lot of the backend Box logic and the custom claude code driver.
+All tests were created by AI as well.
 Frontend was mostly provided by shadcn skills and blocks with lucide react icons.
 
 ## License
