@@ -15,11 +15,15 @@ import {
 import { randomString } from "../oauth";
 import { syncIssues } from "../issue-sync";
 import { syncPullRequests } from "../pr-sync";
-import type { BotJob, ChatMessage } from "../types";
+import type { BotId, BotJob, ChatMessage } from "../types";
 import { targetsFor } from "./chat-logic";
 import { runPipeline } from "./pipeline";
 import { retryStillWanted } from "./pipeline-logic";
+import { getBot } from "./registry";
 import { answerMention } from "./responder";
+import { postEvent } from "./room";
+import { queueSteering } from "./steering";
+import { steerTarget } from "./steering-logic";
 
 /*
  * The crew's heartbeat: one interval per server process, started from
@@ -72,8 +76,27 @@ function drive(job: BotJob) {
     .finally(() => current.active.delete(job.id));
 }
 
+/**
+ * What you say to a bot that has a card right now steers that work: the
+ * message waits on the card as a note, and the bot answers from inside the
+ * run at its next safe point instead of chatting beside it. False when the
+ * bot isn't working a card, and the message is answered as it always was.
+ */
+function steer(message: ChatMessage, bot: BotId): boolean {
+  if (message.author !== "you" || !message.body.trim()) return false;
+  const job = steerTarget(bot, message.body, listBotJobs({ active: true }), listCards());
+  const card = job ? getCard(job.cardId) : null;
+  if (!card) return false;
+  const note = queueSteering(card, { id: randomString(9), author: "you", body: message.body, messageId: message.id });
+  if (!note) return false;
+  // The card may have moved on a stage between the look and the note; whoever has it answers.
+  const holder = getBot(note.bot);
+  postEvent(holder.id, `Heard you. I'm in the middle of ${holder.verb} "${card.title}"; I'll read this at my next safe point and answer here.`, card.id);
+  return true;
+}
+
 function answer(message: ChatMessage) {
-  const bots = targetsFor(message);
+  const bots = targetsFor(message).filter((bot) => !steer(message, bot));
   void Promise.all(
     bots.map((bot) =>
       answerMention(message, bot).catch((error: unknown) => {

@@ -74,6 +74,11 @@ export type Card = {
   /** For a card made from a GitHub issue: its number, in the card's repo. */
   issueNumber?: number | null;
   issueUrl?: string | null;
+  /**
+   * Why the card was stopped part-way, when it was: the person told the bot
+   * working it to stop, or asked Pip to. Cleared when the card runs again.
+   */
+  stopped?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -168,6 +173,12 @@ export type Run = {
   bot?: BotId | null;
   /** The commit subject the scribe wrote, used when the run is approved. */
   commitMessage?: string | null;
+  /**
+   * Set on a cancelled run that was stopped to be restarted later, not
+   * discarded: why. Its changes so far are kept, and the card's next run
+   * continues from them.
+   */
+  stoppedNote?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -253,6 +264,39 @@ export type BotJob = {
   claimedBy: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/**
+ * What a bot does with a steering note: carry on unchanged, adjust its
+ * approach, switch direction, or stop so the card can be restarted later.
+ */
+export const STEER_DECISIONS = ["continue", "adjust", "switch", "stop"] as const;
+export type SteerDecision = (typeof STEER_DECISIONS)[number];
+
+/**
+ * Something said to a bot while it had a card: the person's @mention in the
+ * room, or Pip passing a change on. It waits until the bot's next safe
+ * point, and stays with the card so later stages know the direction moved.
+ */
+export type SteeringNote = {
+  id: string;
+  cardId: string;
+  /** The run the card was on when the note arrived, if it had one yet. */
+  runId: string | null;
+  /** The stage the card was at, and the bot the note was for. */
+  stage: BotStage;
+  bot: BotId;
+  /** Who said it: you in the room, or the bot that passed it on. */
+  author: "you" | BotId;
+  body: string;
+  /** The room message it came from, so the answer can reply to it. */
+  messageId: string | null;
+  /** What the bot decided, and what it said back; null until it has read the note. */
+  decision: SteerDecision | null;
+  reply: string | null;
+  createdAt: string;
+  /** When the working bot read it; null while it waits for a safe point. */
+  deliveredAt: string | null;
 };
 
 /** A line in the Team room, from you or a bot. */

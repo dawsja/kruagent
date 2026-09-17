@@ -211,7 +211,10 @@ test("runner: preflight failures have their own messages", () => {
 
 type FakeBox = {
   check: ClaudeCheck;
+  /** What the CLI prints. `{ wait: ms }` pauses the stream, for a run that is still working. */
   events: unknown[];
+  /** Later CLI processes in the same run print these instead, one entry each. */
+  thenEvents?: unknown[][];
   /** Keep the stream open after the events, until the client goes away. */
   hold?: boolean;
   /** What the workspace's changes are; one added file by default. */
@@ -238,6 +241,8 @@ async function startFakeBox(box: FakeBox) {
   const seen = {
     calls: [] as string[],
     run: null as Record<string, unknown> | null,
+    /** Every CLI process started, oldest first. */
+    runs: [] as Record<string, unknown>[],
     /** Resolves when a held run request is closed by the client. */
     closedEarly: new Promise<void>((resolve) => {
       markClosed = resolve;
@@ -255,10 +260,16 @@ async function startFakeBox(box: FakeBox) {
     if (req.url === "/workspaces" && req.method === "POST") return json(res, { id: body.id, head: "abc" });
     if (req.url?.endsWith("/claude") && req.method === "POST") {
       seen.run = body;
+      seen.runs.push(body);
+      const later = seen.runs.length > 1 ? box.thenEvents?.[seen.runs.length - 2] : undefined;
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write(": connected\n\n");
-      for (const event of box.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
-      if (box.hold) {
+      for (const event of later ?? box.events) {
+        const wait = (event as { wait?: number }).wait;
+        if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+        else if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+      if (box.hold && !later) {
         const ping = setInterval(() => res.write(": ping\n\n"), 200);
         res.on("close", () => {
           clearInterval(ping);
@@ -444,6 +455,123 @@ test("runner: cancelling aborts the box request, which ends the CLI", async () =
       new Promise((_, reject) => setTimeout(() => reject(new Error("the box never saw the request close")), 5_000)),
     ]);
     assert.ok(box.seen.calls.includes("DELETE /workspaces/run1"));
+  } finally {
+    box.close();
+  }
+});
+
+// ---------- steering a run in flight ----------
+
+test("runner: a steering note that changes the work interrupts the CLI after a tool result and continues with it", async () => {
+  const box = await startFakeBox({
+    check: { status: "ok", detail: "ok" },
+    events: [
+      line({ type: "assistant", message: { content: [{ type: "text", text: "Starting." }] } }),
+      line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm install" } }] } }),
+      // Long enough for the note to be read while the command runs.
+      { wait: 3_000 },
+      line({ type: "user", message: { content: [{ type: "tool_result", content: "added 3 packages" }] } }),
+    ],
+    hold: true,
+    thenEvents: [OK_EVENTS],
+  });
+  try {
+    let pending = false;
+    let considered = 0;
+    const input = agentInput({
+      steering: {
+        pending: () => pending,
+        consider: async () => {
+          pending = false;
+          considered += 1;
+          return { decision: "adjust", reply: "Switching to pnpm.", notes: [], direction: "The person: use pnpm, not npm.\n\nYou decided to adjust." };
+        },
+      },
+    });
+    const result = await runCardClaudeCode({
+      ...input,
+      log: (text) => {
+        input.lines.push(text);
+        if (text === "Starting.") pending = true;
+      },
+    });
+
+    assert.equal(considered, 1, "the note was read once");
+    assert.equal(box.seen.runs.length, 2, "the CLI was started again in the same workspace");
+    const first = String(box.seen.runs[0].prompt);
+    const second = String(box.seen.runs[1].prompt);
+    assert.doesNotMatch(first, /pnpm/);
+    assert.match(second, /Task: Add the thing/, "the task is still the task");
+    assert.match(second, /continuation, not a fresh start/);
+    assert.match(second, /The person: use pnpm, not npm\./);
+    assert.match(second, /\$ npm install/, "it is told what it had done");
+    assert.ok(input.lines.includes("Steering from the room (adjust): Switching to pnpm."));
+    assert.ok(input.lines.includes("Continuing in the same workspace with the new direction"));
+    assert.ok(!box.seen.calls.includes("DELETE /workspaces/run1"), "the work so far is kept");
+    assert.equal(result.summary, "Added the thing");
+    assert.equal(result.stopped, undefined);
+    assert.equal(result.writes.length, 1);
+  } finally {
+    box.close();
+  }
+});
+
+test("runner: a note that changes nothing never interrupts the CLI", async () => {
+  const box = await startFakeBox({
+    check: { status: "ok", detail: "ok" },
+    events: [line({ type: "assistant", message: { content: [{ type: "text", text: "Starting." }] } }), { wait: 2_500 }, ...OK_EVENTS],
+  });
+  try {
+    let pending = false;
+    const input = agentInput({
+      steering: {
+        pending: () => pending,
+        consider: async () => {
+          pending = false;
+          return { decision: "continue", reply: "Thanks, carrying on.", notes: [], direction: "Carry on." };
+        },
+      },
+    });
+    const result = await runCardClaudeCode({
+      ...input,
+      log: (text) => {
+        input.lines.push(text);
+        if (text === "Starting.") pending = true;
+      },
+    });
+    assert.equal(box.seen.runs.length, 1);
+    assert.ok(input.lines.includes("Steering from the room (continue): Thanks, carrying on."));
+    assert.equal(result.summary, "Added the thing");
+  } finally {
+    box.close();
+  }
+});
+
+test("runner: a run stopped to be restarted later ends the CLI and keeps what it changed", async () => {
+  const box = await startFakeBox({
+    check: { status: "ok", detail: "ok" },
+    events: [line({ type: "assistant", message: { content: [{ type: "text", text: "Starting." }] } })],
+    hold: true,
+  });
+  try {
+    let stopped = false;
+    const input = agentInput({ isCancelled: () => stopped, isStopped: () => stopped });
+    const result = await runCardClaudeCode({
+      ...input,
+      log: (text) => {
+        input.lines.push(text);
+        if (text === "Starting.") stopped = true;
+      },
+    });
+    await Promise.race([
+      box.seen.closedEarly,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("the box never saw the request close")), 5_000)),
+    ]);
+    assert.equal(result.stopped, true);
+    assert.equal(result.summary, null);
+    assert.equal(result.warning, null);
+    assert.deepEqual(result.writes.map((write) => write.path), ["a.txt"], "the work so far goes with the run");
+    assert.ok(!box.seen.calls.includes("DELETE /workspaces/run1"), "and the workspace stays for the restart");
   } finally {
     box.close();
   }

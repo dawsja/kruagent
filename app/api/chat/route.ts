@@ -2,11 +2,13 @@ import { withSession } from "@/lib/auth/guard";
 import { after, NextResponse } from "next/server";
 import { approveRun } from "@/lib/hq/approve";
 import { checkFiles, cleanName, verifyFile } from "@/lib/hq/bots/attachments";
+import { parseMentions } from "@/lib/hq/bots/chat-logic";
 import { parseCommand, runCommand } from "@/lib/hq/bots/commands";
 import { resolvePrChat } from "@/lib/hq/bots/pr-request";
 import { resetRevisePick, resolveReviseChat } from "@/lib/hq/bots/revise-request";
 import { postEvent, postHumanMessage } from "@/lib/hq/bots/room";
-import { clearChatMessages, getBotsEnabled, listChatMessages } from "@/lib/hq/data";
+import { steerTarget } from "@/lib/hq/bots/steering-logic";
+import { clearChatMessages, getBotsEnabled, listBotJobs, listCards, listChatMessages } from "@/lib/hq/data";
 import { reviseRun } from "@/lib/hq/runs";
 
 const MAX_BODY = 4000;
@@ -81,10 +83,16 @@ async function handlePost(request: Request) {
     postEvent("pip", await runCommand(command));
     return NextResponse.json({ message, notice: null });
   }
+  // What you say to a bot that has a card right now is steering for that
+  // run, whatever else the words look like: "@momo on the dark mode one,
+  // use CSS variables" goes to Momo inside the run, not to the shortcuts
+  // below, which would only say the card is still being worked on.
+  const steers =
+    enabled && parseMentions(text).some((bot) => steerTarget(bot, text, listBotJobs({ active: true }), listCards()));
   // "Make the PR for the theme toggle one" is the person approving a card in
   // their own words, so Kru matches it and runs the same approve flow as the
   // card's button; no model decides to open a pull request.
-  const prChat = resolvePrChat(text);
+  const prChat = steers ? null : resolvePrChat(text);
   if (prChat) {
     resetRevisePick();
     const message = postHumanMessage(text, { pending: false });
@@ -109,7 +117,7 @@ async function handlePost(request: Request) {
   // "On the landing page one, make the hero smaller" is the "Ask for changes"
   // box in the person's own words: Kru matches the card in Review and sends
   // it back with the note, the same revise flow as the card's form.
-  const reviseChat = resolveReviseChat(text);
+  const reviseChat = steers ? null : resolveReviseChat(text);
   if (reviseChat) {
     const message = postHumanMessage(text, { pending: false });
     const revise = reviseChat.revise;

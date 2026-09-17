@@ -214,6 +214,31 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX kru_chat_attachments_message ON kru_chat_attachments (message_id, position);
   `,
+  // Steering. What the person (or Pip, passing it on) says to a bot while it
+  // has a card waits here until the bot's next safe point, then keeps the
+  // bot's decision and answer, so later stages know the direction moved. A
+  // card stopped that way says why until it runs again, and the run it
+  // stopped keeps its note: cancelled, but to be continued, not discarded.
+  `
+  ALTER TABLE kru_cards ADD COLUMN stopped TEXT;
+  ALTER TABLE kru_runs ADD COLUMN stopped_note TEXT;
+  CREATE TABLE kru_steering (
+    id TEXT PRIMARY KEY,
+    card_id TEXT NOT NULL REFERENCES kru_cards (id) ON DELETE CASCADE,
+    run_id TEXT,
+    stage TEXT NOT NULL,
+    bot TEXT NOT NULL,
+    author TEXT NOT NULL,
+    body TEXT NOT NULL,
+    message_id TEXT,
+    decision TEXT CHECK (decision IN ('continue', 'adjust', 'switch', 'stop') OR decision IS NULL),
+    reply TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+  );
+  CREATE INDEX kru_steering_card ON kru_steering (card_id, created_at);
+  CREATE INDEX kru_steering_pending ON kru_steering (card_id) WHERE delivered_at IS NULL;
+  `,
 ];
 
 /** Applies any migrations newer than the stored schema version, one per transaction. */

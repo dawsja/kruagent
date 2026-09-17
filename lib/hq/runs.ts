@@ -11,9 +11,12 @@ import {
   getGithubConnection,
   getRepoInstructions,
   getRun,
+  hasPendingSteering,
   listRuns,
   transitionRun,
 } from "./data";
+import { considerCardSteering } from "./bots/steer-card";
+import { steeringFor } from "./bots/steering";
 import { getRepo } from "./github";
 import { ensureFreshConnection, getFreshGithubConnection } from "./model-auth";
 import { PROVIDER_NAMES, isClaudeCodeRef, parseModelRef } from "./models";
@@ -110,7 +113,8 @@ export function beginRun(
   options: { bot?: BotId | null; followUp?: FollowUp | null } = {},
 ): Run {
   const run = newRun(randomString(12), card, revision, options, new Date().toISOString());
-  createRun(run, { column: "run", status: "running", runId: run.id });
+  // Running again is what clears a card that was stopped part-way.
+  createRun(run, { column: "run", status: "running", runId: run.id, stopped: null });
   return run;
 }
 
@@ -194,14 +198,20 @@ export async function finishRun(cardId: string, runId: string) {
     const replay = replayNeeded(parent);
     const previous =
       parent && run.revisionNote
-        ? { writes: parent.proposedWrites, summary: parent.summary ?? null, note: run.revisionNote, applied: !replay }
+        ? {
+            writes: parent.proposedWrites,
+            summary: parent.summary ?? null,
+            note: run.revisionNote,
+            applied: !replay,
+            resumed: Boolean(parent.stoppedNote),
+          }
         : undefined;
 
     // Room for this run's workspace, keeping the one it means to continue in.
     await pruneWorkspaces([runId, ...(parent && replay ? [parent.id] : [])]).catch(() => undefined);
 
     const runner = claudeCode ? runCardClaudeCode : runCardAgent;
-    const { writes, warning, summary } = await runner({
+    const { writes, warning, summary, stopped } = await runner({
       card,
       github,
       model,
@@ -217,7 +227,22 @@ export async function finishRun(cardId: string, runId: string) {
         appendRunLog(runId, redact(line));
       },
       isCancelled: () => getRun(runId)?.status !== "running",
+      // Cancelled with a reason to continue later, not discarded.
+      isStopped: () => Boolean(getRun(runId)?.stoppedNote),
+      steeringNotes: steeringFor(card.id),
+      steering: {
+        pending: () => hasPendingSteering(card.id),
+        consider: () => considerCardSteering(card, getRun(runId)),
+      },
     });
+
+    // Stopped to be restarted later: what the agent had changed stays with
+    // the run, for the card's next run to continue from, and the workspace
+    // stays until newer runs need the room.
+    if (stopped) {
+      transitionRun(runId, ["cancelled"], null, { proposedWrites: writes, summary });
+      return;
+    }
 
     // Stop for a person: nothing reaches GitHub until Approve. This does
     // nothing if the run was cancelled while the agent worked. A crew run

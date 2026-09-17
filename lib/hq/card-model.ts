@@ -17,6 +17,11 @@ export type CardModelQuestion = {
   instructions: string;
   prompt: string;
   timeoutMs: number;
+  /**
+   * For a Claude Code card: the CLI answers without its file-writing tools.
+   * For a question asked while the builder is still at work in the workspace.
+   */
+  readOnly?: boolean;
 };
 
 /** The model's text, or null when the card's model can't be reached. */
@@ -55,6 +60,7 @@ async function askClaudeCode(card: Card, run: Run, question: CardModelQuestion):
       prompt: question.prompt,
       systemPrompt: question.instructions,
       timeoutMs: question.timeoutMs,
+      ...(question.readOnly ? { readOnly: true } : {}),
     },
     {
       signal: AbortSignal.timeout(question.timeoutMs + 5_000),

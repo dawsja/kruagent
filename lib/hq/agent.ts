@@ -34,7 +34,9 @@ import {
   logText,
   REVIEW_CAREFULLY,
   RunCancelledError,
+  RunStoppedError,
   isTimeout,
+  steerStep,
   revisionPrompt,
   taskPrompt,
   type AgentInput,
@@ -259,6 +261,7 @@ export async function runCardAgent(input: AgentInput): Promise<AgentResult> {
   let summary: string | null = null;
   let stepCount = 0;
   let timedOut = false;
+  let stopped = false;
   // The repo's own notes for agents; Claude Code finds them itself.
   const agentNotes = agentNotesSection(await readAgentNotes(box, id));
   try {
@@ -269,10 +272,9 @@ export async function runCardAgent(input: AgentInput): Promise<AgentResult> {
       prompt: taskPrompt(input, [agentNotes, previous ? revisionPrompt(previous) : FRESH_START]),
       stopWhen: [stepCountIs(MAX_BOX_STEPS), () => summary !== null],
       abortSignal: AbortSignal.timeout(BOX_RUN_TIMEOUT_MS),
-      prepareStep: () => {
-        if (input.isCancelled?.()) throw new RunCancelledError();
-        return undefined;
-      },
+      // Between two steps: where a cancel lands, and a steering note from
+      // the room. The override carries forward to every later step.
+      prepareStep: ({ messages }) => steerStep(input, messages),
       // What the model says before its tools run, so the log and the watch
       // feed read in order. Reasoning stays out; only its visible words.
       onLanguageModelCallEnd: async ({ content }) => {
@@ -298,8 +300,11 @@ export async function runCardAgent(input: AgentInput): Promise<AgentResult> {
     });
     stepCount = result.steps.length;
   } catch (error) {
-    // Out of time: keep whatever the agent got done and flag it for review.
-    if (!(error instanceof RunCancelledError) && isTimeout(error)) {
+    if (error instanceof RunStoppedError) {
+      // Stopped to be restarted later: what it changed so far is collected.
+      stopped = true;
+    } else if (!(error instanceof RunCancelledError) && isTimeout(error)) {
+      // Out of time: keep whatever the agent got done and flag it for review.
       timedOut = true;
     } else {
       await deleteWorkspace(box, id).catch(() => undefined);
@@ -308,7 +313,9 @@ export async function runCardAgent(input: AgentInput): Promise<AgentResult> {
   }
 
   let warning: string | null = null;
-  if (timedOut) {
+  if (stopped) {
+    // Nobody reviews a stopped run; the card's next run continues it.
+  } else if (timedOut) {
     warning = `The agent ran out of time (${BOX_RUN_TIMEOUT_MS / 60_000} minutes) before saying it was done. ${REVIEW_CAREFULLY}`;
   } else if (!summary && stepCount >= MAX_BOX_STEPS) {
     warning = `The agent hit its ${MAX_BOX_STEPS}-step limit before saying it was done. ${REVIEW_CAREFULLY}`;
@@ -329,7 +336,7 @@ export async function runCardAgent(input: AgentInput): Promise<AgentResult> {
     // The workspace is left standing: a revision continues in it, and a
     // shell can be opened in it while the card waits for review. Whoever
     // owns the run decides when it goes (see `releaseWorkspace`).
-    return { writes: validateProposedWrites(writes), warning, summary };
+    return { writes: validateProposedWrites(writes), warning, summary, ...(stopped ? { stopped } : {}) };
   } catch (error) {
     if (changed === 0) {
       await deleteWorkspace(box, id).catch(() => undefined);

@@ -40,6 +40,8 @@ import { ensureCardModel } from "./models";
 import { botForStage, getBot } from "./registry";
 import { postEvent } from "./room";
 import { stageInstructions } from "./souls";
+import { considerCardSteering } from "./steer-card";
+import { lateSteering, steeringFor } from "./steering";
 
 /*
  * The crew's pipeline for one card: Momo builds (the ordinary agent run),
@@ -47,6 +49,11 @@ import { stageInstructions } from "./souls";
  * may send it back to Momo, Bibi writes it up, and the card lands in Review
  * for the person. Every step is a compare-and-set on the job, so a restart
  * or a cancel can't be raced.
+ *
+ * A message for the bot that has the card is read at that bot's next safe
+ * point (see steering.ts): inside the builder's own loop for Momo, and here
+ * for the others, before a stage starts, between Kiko's commands, and
+ * after Lulu's and Bibi's question, before anything is made of the answer.
  */
 
 /** Longest one of Kiko's commands may run. */
@@ -71,6 +78,51 @@ function fileCount(run: Run) {
   return `${n} file${n === 1 ? "" : "s"}`;
 }
 
+function clipNote(text: string, max = 200) {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * A safe point for Kiko, Lulu and Bibi. Returns true when the stage must
+ * not go on as it was: the card was stopped, the change went back to Momo
+ * because the direction switched, or (`redo`, for a stage that has already
+ * asked its question) the stage should ask again with the note in hand.
+ * An adjustment before the stage has started needs nothing: the prompts
+ * read the card's steering notes when they are built.
+ */
+async function steered(job: BotJob, card: Card, run: Run | null, options: { redo?: boolean } = {}): Promise<boolean> {
+  const outcome = await considerCardSteering(card, run);
+  if (!outcome) return false;
+  if (run) appendRunLog(run.id, `Steering from the room (${outcome.decision}): ${outcome.reply}`);
+  if (outcome.decision === "stop") return true;
+  if (outcome.decision === "adjust") return Boolean(options.redo);
+  if (outcome.decision !== "switch" || !run) return false;
+
+  // A new direction is the builder's to take: the change goes back to Momo,
+  // like a review that asked for changes, without using up a review round.
+  const bot = botForStage(job.stage as BotStage) ?? getBot("pip");
+  const said = outcome.notes.map((note) => clipNote(note.body, 1_000)).join("\n");
+  const note = `The direction of this card changed while ${bot.name} was ${bot.verb}:\n${said}\nRework the change to fit.`;
+  if (!claimForRevision(run, note)) return false;
+  const revision = beginRun(card, { of: run, note }, { bot: "momo" });
+  if (transitionBotJob(job.id, [job.stage], "build", { runId: revision.id })) {
+    postEvent(bot.id, `${quote(card)} is changing direction, so it goes back to the builder. @momo over to you.`, card.id);
+  }
+  return true;
+}
+
+/** Notes nobody got to read before the crew was done: say so, rather than drop them silently. */
+function tooLateToSteer(card: Card) {
+  const late = lateSteering(card.id);
+  if (late.length === 0) return;
+  postEvent(
+    "pip",
+    `A message for the crew about ${quote(card)} came after they were done with it, so nobody acted on it: "${clipNote(late.map((note) => note.body).join(" / "))}". Ask for changes on the card to have it taken in.`,
+    card.id,
+  );
+}
+
 /** Drives a job from its current stage to the end. Returns when it is over. */
 export async function runPipeline(initial: BotJob): Promise<void> {
   let job = initial;
@@ -90,6 +142,8 @@ export async function runPipeline(initial: BotJob): Promise<void> {
       return;
     }
     try {
+      // Momo reads her messages inside the run; the others, before they start.
+      if (job.stage !== "build" && (await steered(job, card, run))) continue;
       if (job.stage === "build") await build(job, card, run);
       else if (job.stage === "test") await test(job, card, run);
       else if (job.stage === "review") await review(job, card, run);
@@ -114,11 +168,15 @@ async function build(job: BotJob, initial: Card, existing: Run | null) {
     const problem = runProblem(card);
     if (problem) throw new SetupError(problem);
     // A failed follow-up is picked up again as one, on its pull request.
-    run = beginRun(card, retryOf(card), { bot: "momo" });
+    // A card stopped part-way is continued from the work it had.
+    const base = retryOf(card);
+    run = beginRun(card, base, { bot: "momo" });
     if (!transitionBotJob(job.id, ["build"], "build", { runId: run.id })) return;
     postEvent(
       "momo",
-      `Picking up ${quote(card)}${job.rounds ? ` again, round ${job.rounds + 1}` : job.attempts ? `, second try` : ""}.`,
+      base?.of.stoppedNote
+        ? `Picking ${quote(card)} back up from where it was stopped.`
+        : `Picking up ${quote(card)}${job.rounds ? ` again, round ${job.rounds + 1}` : job.attempts ? `, second try` : ""}.`,
       card.id,
     );
   }
@@ -171,6 +229,8 @@ async function test(job: BotJob, card: Card, run: Run | null) {
         else appendRunLog(run.id, `  exit ${result.exitCode}`);
         results.push({ command, exitCode: result.exitCode, timedOut: result.timedOut, output: result.output });
         if (getRun(run.id)?.status === "cancelled") return;
+        // Between two commands nothing is half-done.
+        if (await steered(job, card, run)) return;
       }
       report = formatTestReport(results);
     }
@@ -189,9 +249,12 @@ async function review(job: BotJob, card: Card, run: Run | null) {
   if (!run) throw new StageError("No run to review");
   const text = await reviewRun(card, run, {
     instructions: stageInstructions("lulu", REVIEW_RULES),
-    prompt: reviewPrompt(card, run, job.testReport, getRepoInstructions(card.repo)),
+    prompt: reviewPrompt(card, run, job.testReport, getRepoInstructions(card.repo), steeringFor(card.id)),
     toolRules: REVIEW_TOOL_RULES,
   });
+  // A message that came while she read: the verdict isn't acted on until it
+  // is answered, and a review it changes is done again.
+  if (await steered(job, card, run, { redo: true })) return;
   const { verdict, notes } = parseVerdict(text);
   appendRunLog(run.id, `Review by Lulu: ${verdict.toUpperCase()}${notes ? `\n${notes}` : ""}`);
   const next = nextStageAfterReview(verdict, job.rounds);
@@ -242,13 +305,21 @@ async function scribe(job: BotJob, card: Card, run: Run | null) {
   try {
     const text = await askCardModel(card, run, {
       instructions: stageInstructions("bibi", SCRIBE_RULES),
-      prompt: scribePrompt(card, run, job.testReport, job.reviewVerdict === "changes" ? (run.warning ?? null) : null),
+      prompt: scribePrompt(
+        card,
+        run,
+        job.testReport,
+        job.reviewVerdict === "changes" ? (run.warning ?? null) : null,
+        steeringFor(card.id),
+      ),
       timeoutMs: QUESTION_TIMEOUT_MS,
     });
     summary = cleanSummary(text) ?? summary;
   } catch {
     // The builder's own summary stands.
   }
+  // Last safe point: once the card is handed over, the crew is done with it.
+  if (await steered(job, card, run, { redo: true })) return;
   const commitMessage = await generateCommitMessage(card, { ...run, summary });
   if (
     !transitionRun(
@@ -277,6 +348,7 @@ async function scribe(job: BotJob, card: Card, run: Run | null) {
         card.id,
       );
     }
+    tooLateToSteer(card);
     return;
   }
 
@@ -290,6 +362,7 @@ async function scribe(job: BotJob, card: Card, run: Run | null) {
       card.id,
     );
   }
+  tooLateToSteer(card);
 }
 
 /** Ends a job with an error and makes sure the card is somewhere sensible. */
@@ -304,6 +377,8 @@ function failJob(job: BotJob, card: Card, message: string, setup: boolean) {
   const bot = botForStage(stage) ?? getBot("pip");
   postEvent(bot.id, `Stopped on ${quote(card)} while ${bot.verb}: ${message}`, card.id);
   if (retryAt) postEvent("pip", `I'll have the crew try ${quote(card)} again in ${Math.round(RETRY_BACKOFF_MS / 60_000)} minutes.`, card.id);
+  // A note still waiting is read by the retry; without one, nobody will.
+  else tooLateToSteer(card);
 
   if (run?.status === "needs_approval") {
     // The change exists; hand it to the person with the crew's note.
